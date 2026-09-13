@@ -1,5 +1,9 @@
 # @ozjsey/v-copy
 
+## Playground
+
+Try the live examples in the [npm portfolio playground](https://github.com/ozJSey/npm-portfolio-playground).
+
 [![npm](https://img.shields.io/npm/v/@ozjsey/v-copy.svg)](https://www.npmjs.com/package/@ozjsey/v-copy)
 ![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![gzipped 3.33 KiB](https://img.shields.io/badge/gzipped-3.33%20KiB-blue.svg)
