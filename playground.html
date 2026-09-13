@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>v-copy Playground</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; }
+    p.hint { font-size: .85rem; color: #666; margin: .25rem 0 .75rem; }
+    button { cursor: pointer; padding: .4rem .9rem; border: 1px solid #ccc; border-radius: 6px; background: #f5f5f5; font-size: .9rem; }
+    button:hover { background: #e8e8e8; }
+    section { border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    ul.plain { list-style: none; padding: 0; margin: 0; }
+    .copyable { display: inline-block; padding: .25rem .5rem; border-radius: 6px; border: 1px dashed #bbb; margin: .15rem 0; transition: background .15s, outline-color .15s; }
+    .copyable:hover { background: #fafafa; }
+    .copyable:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+    code { background: #f0f0f0; padding: .2rem .4rem; border-radius: 4px; }
+
+    /* The free "Copied!" feedback — driven by v-copy's class + attribute. */
+    [data-copied] { outline: 2px solid #16a34a; }
+    [data-copied]::after { content: ' ✓ Copied'; color: #16a34a; font-size: .8em; }
+
+    .log { font-size: .8rem; color: #444; }
+    .badge { display: inline-block; background: #16a34a; color: #fff; border-radius: 999px; padding: 0 .5rem; font-size: .75rem; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1>v-copy Playground</h1>
+
+    <!-- 1. Bare: copy any element's textContent -->
+    <section>
+      <h2>1 · Copy any element's text</h2>
+      <p class="hint">Bare <code>v-copy</code> copies the element's textContent. Click (or focus + Enter).</p>
+      <span class="copyable" v-copy>npm install @ozjsey/v-copy</span>
+      <span class="copyable" v-copy>hello@example.com</span>
+    </section>
+
+    <!-- 2. v-for + shared history ref -->
+    <section>
+      <h2>2 · v-for with a shared history ref</h2>
+      <p class="hint"><code>v-copy="history"</code> on every row → one unified, newest-first log (capped at 10).</p>
+      <ul class="plain">
+        <li v-for="email in emails" :key="email">
+          <span class="copyable" v-copy="history">{{ email }}</span>
+        </li>
+      </ul>
+      <p class="log">History ({{ history.length }}): {{ history.join('  ·  ') || '—' }}</p>
+    </section>
+
+    <!-- 3. Slot-like controller -->
+    <section>
+      <h2>3 · Slot-like controller (programmatic + state)</h2>
+      <p class="hint">Bind a <code>reactive</code> object; read <code>copied</code>/<code>history</code>, call <code>copy()</code>.</p>
+      <code v-copy="ctrl">{{ snippet }}</code>
+      <div style="margin-top:.6rem">
+        <button @click="ctrl.copy?.()">Copy programmatically</button>
+        <span v-if="ctrl.copied" class="badge">Copied!</span>
+        <button @click="ctrl.clear?.()" style="margin-left:.5rem">Clear</button>
+      </div>
+      <p class="log">{{ ctrl.history?.length ?? 0 }} copies · last: {{ ctrl.last ?? '—' }}</p>
+    </section>
+
+    <!-- 4. Rich, keyed multi-copy -->
+    <section>
+      <h2>4 · Rich, keyed multi-copy</h2>
+      <p class="hint"><code>v-copy:[key].rich="log"</code> records <code>{ text, at, ok, key }</code>.</p>
+      <table>
+        <tr v-for="row in rows" :key="row.id">
+          <td><span class="copyable" v-copy:[row.id+':email'].rich="richLog">{{ row.email }}</span></td>
+          <td><span class="copyable" v-copy:[row.id+':phone'].rich="richLog">{{ row.phone }}</span></td>
+        </tr>
+      </table>
+      <ul class="plain log">
+        <li v-for="(e, i) in richLog" :key="i">
+          [{{ e.key }}] {{ e.text }} — {{ new Date(e.at).toLocaleTimeString() }} {{ e.ok ? '✓' : '✗' }}
+        </li>
+      </ul>
+    </section>
+
+    <!-- 5. Source override + custom feedback + callback -->
+    <section>
+      <h2>5 · Source override + callback</h2>
+      <p class="hint">Button shows a label, but copies a secret token. Custom 2.5s feedback.</p>
+      <button v-copy="{ source: token, feedback: { duration: 2500 }, onSuccess: onCopied }">
+        Copy API token
+      </button>
+      <p class="log">{{ message }}</p>
+    </section>
+
+    <!-- 6. Disabled -->
+    <section>
+      <h2>6 · Disabled</h2>
+      <button v-copy="false">This button does nothing</button>
+    </section>
+  </div>
+
+  <script type="importmap">
+  { "imports": { "vue": "https://unpkg.com/vue@3/dist/vue.esm-browser.js" } }
+  </script>
+  <script type="module">
+    import { createApp, ref, reactive } from 'vue'
+    import { vCopy } from './dist/vCopy.min.js'
+
+    createApp({
+      setup() {
+        const emails = ['ada@example.com', 'grace@example.com', 'linus@example.com', 'margaret@example.com']
+        const history = ref([])
+
+        const snippet = ref('const x = useClipboardButNotReally()')
+        const ctrl = reactive({})
+
+        const rows = [
+          { id: 'u1', email: 'ada@example.com', phone: '555-0100' },
+          { id: 'u2', email: 'grace@example.com', phone: '555-0199' },
+        ]
+        const richLog = ref([])
+
+        const token = ref('sk_live_' + Math.random().toString(36).slice(2))
+        const message = ref('')
+        const onCopied = (r) => { message.value = `Copied "${r.text}" via ${r.via}` }
+
+        return { emails, history, snippet, ctrl, rows, richLog, token, message, onCopied }
+      },
+    })
+      .directive('copy', vCopy)
+      .mount('#app')
+  </script>
+</body>
+</html>
