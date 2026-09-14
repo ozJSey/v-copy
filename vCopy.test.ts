@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { createApp, ref, reactive, nextTick } from 'vue'
+import { createApp, ref, reactive, readonly, nextTick } from 'vue'
 import { vCopy, VCopyPlugin, type CopyResult, type CopyController, type RichCopyEntry } from './vCopy'
+// Internal, deliberately not part of the public surface: `warnOnce` latches per
+// module, so without this a "it warns" assertion only proves no earlier test
+// spent the latch, and a "it does not warn" assertion proves nothing at all.
+import { resetWarnings } from './src/warn'
+// Internal too: the SSR branch of the copy pipeline is unreachable through the
+// directive, because `mounted` never runs without a DOM.
+import { runCopy } from './src/clipboard'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,6 +48,7 @@ function onceResult(target: EventTarget): Promise<CopyResult> {
 let writeText: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
+  resetWarnings()
   writeText = vi.fn().mockResolvedValue(undefined)
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, writable: true, configurable: true })
   if (typeof document.execCommand !== 'function') {
@@ -509,8 +517,8 @@ describe('dedupe', () => {
   })
 
   it('compares TEXT only: a differently-labelled repeat replaces the row and the newest label wins', async () => {
-    // `warnOnce` latches per module, not per test — this is the only place the
-    // label-dropped path runs, so the spy is guaranteed to see the first firing.
+    // `resetWarnings()` runs in `beforeEach`, so the spy sees this firing
+    // regardless of what any other test warned about first.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const log = ref<RichCopyEntry[]>([])
     const { find, unmount } = mount(
@@ -977,5 +985,739 @@ describe('lifecycle & modifiers', () => {
     await ctrl.copy!()
     expect(writeText).toHaveBeenCalledWith('prog')
     unmount()
+  })
+})
+
+// ===========================================================================
+// Ownership: a config object belongs to the CONSUMER (read-only), a controller
+// belongs to the LIBRARY (written into). The role is decided by one question —
+// "is this a mutable reactive object?" — never by the object's shape.
+// ===========================================================================
+describe('ownership: consumer config vs library controller', () => {
+  it('a frozen config object mounts and copies without throwing', async () => {
+    const cfg = Object.freeze({ source: 'frozen-token' })
+    const { el, unmount } = mount('<button v-copy="cfg">label</button>', { cfg })
+    el.click(); await flush()
+    expect(writeText).toHaveBeenCalledWith('frozen-token')
+    unmount()
+  })
+
+  it('leaves a frozen config object untouched — no history, copied, last, copy or clear', async () => {
+    const cfg = Object.freeze({ source: 'frozen-token' })
+    const { el, unmount } = mount('<button v-copy="cfg">label</button>', { cfg })
+    el.click(); await flush()
+    expect(Object.keys(cfg)).toEqual(['source'])
+    unmount()
+  })
+
+  it('a readonly() config object mounts and copies without throwing', async () => {
+    const raw = { source: 'readonly-token' }
+    const cfg = readonly(reactive(raw))
+    const { el, unmount } = mount('<button v-copy="cfg">label</button>', { cfg })
+    el.click(); await flush()
+    expect(writeText).toHaveBeenCalledWith('readonly-token')
+    expect(Object.keys(raw)).toEqual(['source'])
+    unmount()
+  })
+
+  it('a plain config literal is never adopted: no invented history, no controller members', async () => {
+    const cfg: Record<string, unknown> = { source: 'tok' }
+    const { el, unmount } = mount('<button v-copy="cfg">label</button>', { cfg })
+    el.click(); await flush()
+    expect(Object.keys(cfg)).toEqual(['source'])
+    unmount()
+  })
+
+  it('a config binding with a `key` and no sink does not warn about a history it never asked for', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { el, unmount } = mount('<button v-copy:label="cfg">x</button>', { cfg: { source: 'tok' } })
+    el.click(); await flush()
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('.rich')
+    unmount()
+  })
+
+  it('records into a sink handed over by a frozen config — the array is still the consumer\'s', async () => {
+    const sink: string[] = []
+    const cfg = Object.freeze({ source: 'frozen-token', sink })
+    const { el, unmount } = mount('<button v-copy="cfg">label</button>', { cfg })
+    el.click(); await flush()
+    expect(sink).toEqual(['frozen-token'])
+    unmount()
+  })
+
+  it('still warns when a `key` really is dropped by a string history', async () => {
+    // Positive control for the test above: the one-shot must still be unspent
+    // when a genuine mistake happens.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const hist = ref<string[]>([])
+    const { el, unmount } = mount('<button v-copy:label="{ source: \'tok\', sink: hist }">x</button>', { hist })
+    el.click(); await flush()
+    expect(hist.value).toEqual(['tok'])
+    expect(warn.mock.calls.flat().join(' ')).toContain('.rich')
+    unmount()
+  })
+
+  it('still enriches the documented reactive controller in place', async () => {
+    const ctrl = reactive<CopyController>({})
+    const { unmount } = mount('<code v-copy="ctrl">snippet</code>', { ctrl })
+    expect(typeof ctrl.copy).toBe('function')
+    expect(typeof ctrl.clear).toBe('function')
+    expect(Array.isArray(ctrl.history)).toBe(true)
+    expect(ctrl.copied).toBe(false)
+    unmount()
+  })
+})
+
+// ===========================================================================
+describe('the controller is live, not a render snapshot', () => {
+  it('ctrl.disabled = true stops the copy with no unrelated re-render', async () => {
+    const ctrl = reactive<CopyController>({ source: 'live' })
+    const { el, unmount } = mount('<button v-copy="ctrl">c</button>', { ctrl })
+    el.click(); await flush()
+    expect(writeText).toHaveBeenCalledTimes(1)
+
+    ctrl.disabled = true
+    await nextTick()
+    el.click(); await flush()
+    expect(writeText).toHaveBeenCalledTimes(1)
+
+    ctrl.disabled = false
+    await nextTick()
+    el.click(); await flush()
+    expect(writeText).toHaveBeenCalledTimes(2)
+    unmount()
+  })
+
+  it('ctrl.trigger swaps the listener with no unrelated re-render', async () => {
+    const ctrl = reactive<CopyController>({ source: 'live' })
+    const { el, unmount } = mount('<button v-copy="ctrl">c</button>', { ctrl })
+    ctrl.trigger = 'dblclick'
+    await nextTick()
+    el.click(); await flush()
+    expect(writeText).not.toHaveBeenCalled()
+    el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('live')
+    unmount()
+  })
+
+  it('ctrl.max applies to the next copy with no unrelated re-render', async () => {
+    const ctrl = reactive<CopyController>({})
+    const { unmount } = mount('<code v-copy="ctrl">x</code>', { ctrl })
+    await ctrl.copy!('a'); await ctrl.copy!('b'); await ctrl.copy!('c')
+    expect(ctrl.history).toEqual(['c', 'b', 'a'])
+    ctrl.max = 2
+    await nextTick()
+    await ctrl.copy!('d')
+    expect(ctrl.history).toEqual(['d', 'c'])
+    unmount()
+  })
+
+  it('re-points the history when ctrl.sink is swapped', async () => {
+    const first: string[] = []
+    const second: string[] = []
+    const ctrl = reactive<CopyController>({ sink: first })
+    const { unmount } = mount('<code v-copy="ctrl">x</code>', { ctrl })
+    await ctrl.copy!('one')
+    expect(first).toEqual(['one'])
+
+    ctrl.sink = second
+    await nextTick()
+    await ctrl.copy!('two')
+    expect(second).toEqual(['two'])
+    expect(first).toEqual(['one'])
+    expect(ctrl.history).toEqual(['two'])
+    unmount()
+  })
+
+  it('a controller bound while disabled still receives its API, and reports error: disabled', async () => {
+    const ctrl = reactive<CopyController>({ source: 's', disabled: true })
+    const { unmount } = mount('<code v-copy="ctrl">x</code>', { ctrl })
+    expect(typeof ctrl.copy).toBe('function')
+    expect(Array.isArray(ctrl.history)).toBe(true)
+    const r = await ctrl.copy!()
+    expect(r.success).toBe(false)
+    expect(r.error).toBe('disabled')
+
+    ctrl.disabled = false
+    await nextTick()
+    const ok = await ctrl.copy!()
+    expect(ok.success).toBe(true)
+    unmount()
+  })
+
+  it('stops following the controller once the element unmounts', async () => {
+    const ctrl = reactive<CopyController>({ source: 'live' })
+    const { el, unmount } = mount('<button v-copy="ctrl">c</button>', { ctrl })
+    unmount()
+    expect(() => { ctrl.trigger = 'dblclick'; ctrl.disabled = true }).not.toThrow()
+    el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    el.click(); await flush()
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it('mutating library-owned state does not re-enter the resolver (no feedback loop)', async () => {
+    vi.useFakeTimers()
+    const ctrl = reactive<CopyController>({ source: 'x' })
+    const { el, unmount } = mount('<code v-copy="ctrl">x</code>', { ctrl })
+    await ctrl.copy!()
+    expect(ctrl.copied).toBe(true)
+    // the feedback window closes exactly once; a resolver loop would never settle
+    vi.advanceTimersByTime(1500)
+    expect(ctrl.copied).toBe(false)
+    expect(ctrl.history).toEqual(['x'])
+    expect(el.hasAttribute('data-copied')).toBe(false)
+    unmount()
+  })
+})
+
+// ===========================================================================
+describe('last mirrors the head of the history, whoever wrote it', () => {
+  it('updates when a second binding writes into the same sink', async () => {
+    const ctrl = reactive<CopyController>({ sink: [] })
+    const { find, unmount } = mount(
+      '<div><code class="a" v-copy="ctrl">first</code>' +
+        '<code class="b" v-copy="{ source: \'picked-from-row\', sink: ctrl.history }">row</code></div>',
+      { ctrl },
+    )
+    find('.a').click(); await flush()
+    expect(ctrl.last).toBe('first')
+    find('.b').click(); await flush()
+    expect(ctrl.history?.[0]).toBe('picked-from-row')
+    expect(ctrl.last).toBe('picked-from-row')
+    unmount()
+  })
+})
+
+// ===========================================================================
+describe('audit regressions', () => {
+  it('stops mirroring the array it left when ctrl.sink is swapped', async () => {
+    const first: string[] = []
+    const second: string[] = []
+    const ctrl = reactive<CopyController>({ sink: first })
+    const { find, unmount } = mount(
+      '<div><code class="a" v-copy="ctrl">x</code>' +
+        '<code class="b" v-copy="{ source: \'into-the-old-array\', sink: first }">y</code></div>',
+      { ctrl, first },
+    )
+    await ctrl.copy!('one')
+    ctrl.sink = second
+    await nextTick()
+    await ctrl.copy!('two')
+    expect(ctrl.last).toBe('two')
+
+    find('.b').click(); await flush() // writes into `first`, which ctrl no longer shows
+    expect(first[0]).toBe('into-the-old-array')
+    expect(ctrl.last).toBe('two')
+    expect(ctrl.history).toEqual(['two'])
+    unmount()
+  })
+
+  it('a non-numeric max falls back to the default cap instead of removing it', async () => {
+    const hist = ref<string[]>([])
+    const { el, unmount } = mount(
+      '<button v-copy="{ source: src, sink: hist, max: \'lots\', dedupe: false }">x</button>',
+      { hist, src: ref('a') },
+    )
+    for (let i = 0; i < 12; i++) { el.click(); await flush() }
+    expect(hist.value.length).toBe(10)
+    unmount()
+  })
+
+  it('an emptied max input does not collapse the history to a single row', async () => {
+    const hist = ref<string[]>(['c', 'b', 'a'])
+    const max = ref<number | string>(6)
+    const { el, unmount } = mount(
+      '<button v-copy="{ source: \'d\', sink: hist, max }">x</button>',
+      { hist, max },
+    )
+    max.value = '' // what `v-model.number` writes when the field is cleared
+    await nextTick()
+    el.click(); await flush()
+    expect(hist.value).toEqual(['d', 'c', 'b', 'a'])
+    unmount()
+  })
+
+  it('an emptied feedback duration does not turn the copied state off', async () => {
+    const { el, unmount } = mount(
+      '<button v-copy="{ source: \'x\', feedback: { duration: \'\' } }">x</button>',
+    )
+    el.click(); await flush()
+    expect(el.hasAttribute('data-copied')).toBe(true)
+    unmount()
+  })
+
+  it('.once stays detached across a re-render', async () => {
+    const tick = ref(0)
+    const { el, unmount } = mount(
+      '<button v-copy.once="\'x\'">{{ tick }}</button>',
+      { tick },
+    )
+    el.click(); await flush()
+    expect(el.hasAttribute('tabindex')).toBe(false)
+    tick.value++
+    await nextTick()
+    expect(el.hasAttribute('tabindex')).toBe(false)
+    expect(el.hasAttribute('role')).toBe(false)
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    el.click(); await flush()
+    expect(writeText).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('a keyboard trigger copies once per Enter, not twice', async () => {
+    const { el, unmount } = mount('<span v-copy="{ source: \'k\', trigger: \'keydown\' }">c</span>')
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flush()
+    expect(writeText).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('re-creates the aria-live region after something removes it', async () => {
+    const first = mount('<button v-copy="\'x\'">c</button>')
+    first.el.click()
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('[aria-live="polite"]')?.textContent).toBe('Copied')
+    })
+    first.unmount()
+    document.body.querySelector('[aria-live="polite"]')!.remove()
+
+    const second = mount('<button v-copy="\'y\'">c</button>')
+    second.el.click()
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('[aria-live="polite"]')?.textContent).toBe('Copied')
+    })
+    second.unmount()
+  })
+})
+
+// ===========================================================================
+// The user's own selection.
+//
+// jsdom implements `Selection`/`Range` well enough for the string handling, the
+// scoping and the empty-refusal. It does NOT implement the thing the feature is
+// actually about: a real browser collapses the document selection as the
+// DEFAULT ACTION of `mousedown` on a non-interactive host, between the press
+// and the click. `press()` + `clearSelection()` below models that sequence
+// deliberately; the proof that the sequence is the real one is the browser
+// check in playground/scripts/interactions/v-copy.mjs, driven with trusted
+// `Input.dispatchMouseEvent` and read back off the real clipboard.
+// ===========================================================================
+describe('user selection', () => {
+  /** Highlight part of a text node, the way a drag would. */
+  function selectText(node: Node, start: number, end: number): void {
+    const range = document.createRange()
+    range.setStart(node, start)
+    range.setEnd(node, end)
+    const sel = window.getSelection()
+    sel!.removeAllRanges()
+    sel!.addRange(range)
+  }
+
+  function clearSelection(): void {
+    window.getSelection()?.removeAllRanges()
+  }
+
+  /**
+   * The press. In jsdom `PointerEvent` does not exist, so the directive listens
+   * for `mousedown` — the same event, one rung down the compatibility ladder.
+   */
+  function press(el: HTMLElement): void {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+  }
+
+  /** A paragraph of selectable text outside the copy trigger. */
+  function paragraph(text = 'the quick brown fox'): Text {
+    const p = document.createElement('p')
+    p.textContent = text
+    document.body.appendChild(p)
+    return p.firstChild as Text
+  }
+
+  afterEach(() => {
+    clearSelection()
+    document.body.querySelectorAll('p, input, textarea, div.card').forEach((n) => n.remove())
+  })
+
+  it('copies what the user highlighted, not the host textContent', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9) // "quick"
+    const { el, unmount } = mount('<button v-copy.selection>Copy selection</button>')
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('quick')
+    unmount()
+  })
+
+  it('survives the press that destroys it — the whole point of the feature', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<span v-copy.selection>Copy selection</span>')
+
+    press(el)
+    clearSelection() // what the browser does as mousedown's default action
+    el.click()
+    await flush()
+
+    expect(writeText).toHaveBeenCalledWith('quick')
+    unmount()
+  })
+
+  it('refuses an empty selection instead of clearing the clipboard', async () => {
+    const { el, unmount } = mount('<button v-copy.selection>Copy selection</button>')
+    const result = onceResult(el)
+    el.click()
+    expect((await result).error).toBe('empty')
+    await flush()
+    expect(writeText).not.toHaveBeenCalled()
+    expect(el.hasAttribute('data-copied')).toBe(false)
+    unmount()
+  })
+
+  it('refuses a collapsed caret — a `user-select: none` region stringifies the same way', async () => {
+    const text = paragraph()
+    selectText(text, 4, 4) // collapsed: exactly what user-select:none produces
+    const { el, unmount } = mount('<button v-copy.selection>Copy</button>')
+    const result = onceResult(el)
+    el.click()
+    expect((await result).error).toBe('empty')
+    expect(writeText).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('records nothing in the history when the selection is empty', async () => {
+    const hist = ref<string[]>([])
+    const { el, unmount } = mount('<button v-copy.selection="hist">Copy</button>', { hist })
+    el.click()
+    await flush()
+    expect(hist.value).toEqual([])
+    unmount()
+  })
+
+  it('prefers the LIVE selection when it changed between the press and the copy', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9) // "quick"
+    const { el, unmount } = mount('<span v-copy.selection>Copy</span>')
+    press(el)
+    selectText(text, 10, 15) // the user re-selected: "brown"
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('brown')
+    unmount()
+  })
+
+  it('consumes the captured selection once — a second activation refuses', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<span v-copy.selection>Copy</span>')
+
+    press(el)
+    clearSelection()
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('quick')
+
+    const second = onceResult(el)
+    el.click() // no new press, nothing selected
+    expect((await second).error).toBe('empty')
+    expect(writeText).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('within: true confines the selection to the bound element', async () => {
+    const { el, unmount } = mount(
+      '<div v-copy="{ selection: { within: true } }">inside this host</div>',
+    )
+    const outside = paragraph('outside text')
+    selectText(outside, 0, 7)
+    const refused = onceResult(el)
+    el.click()
+    expect((await refused).error).toBe('empty')
+
+    selectText(el.firstChild as Text, 0, 6) // "inside"
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('inside')
+    unmount()
+  })
+
+  it("within: '.card' resolves the nearest matching ancestor", async () => {
+    const card = document.createElement('div')
+    card.className = 'card'
+    const p = document.createElement('p')
+    p.textContent = 'card text here'
+    card.appendChild(p)
+    document.body.appendChild(card)
+
+    const { el, unmount } = mount(
+      '<button v-copy="{ selection: { within: \'.card\' } }">Copy</button>',
+    )
+    card.appendChild(el) // the button now lives inside the card, as it would
+
+    const elsewhere = paragraph('somewhere else entirely')
+    selectText(elsewhere, 0, 9)
+    const refused = onceResult(el)
+    el.click()
+    expect((await refused).error).toBe('empty')
+
+    selectText(p.firstChild as Text, 0, 9) // "card text"
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('card text')
+    card.remove()
+    unmount()
+  })
+
+  it('a selection that SPANS the container is out of scope, not clipped', async () => {
+    const wrap = document.createElement('div')
+    wrap.innerHTML = '<span>before </span><div class="card"><p>card text</p></div><span> after</span>'
+    document.body.appendChild(wrap)
+
+    const { el, unmount } = mount('<button v-copy="{ selection: { within: \'.card\' } }">Copy</button>')
+    wrap.querySelector('.card')!.appendChild(el)
+
+    const range = document.createRange()
+    range.setStart(wrap.firstChild!.firstChild!, 0)
+    range.setEnd(wrap.lastChild!.firstChild!, 5)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+
+    const refused = onceResult(el)
+    el.click()
+    expect((await refused).error).toBe('empty')
+    expect(writeText).not.toHaveBeenCalled()
+    wrap.remove()
+    unmount()
+  })
+
+  it('fails closed when `within` matches nothing, and says so once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<button v-copy="{ selection: { within: \'.nope\' } }">Copy</button>')
+    const refused = onceResult(el)
+    el.click()
+    expect((await refused).error).toBe('empty')
+    expect(writeText).not.toHaveBeenCalled()
+    expect(warn.mock.calls.flat().join(' ')).toContain('selection.within')
+    unmount()
+  })
+
+  it("copies a focused field's own selection, which only Chrome mirrors into the document", async () => {
+    const field = document.createElement('input')
+    field.value = 'sk-live-4417'
+    document.body.appendChild(field)
+    field.focus()
+    field.setSelectionRange(3, 7) // "live"
+    expect(window.getSelection()!.toString()).toBe('') // jsdom behaves like Firefox/Safari here
+
+    const { el, unmount } = mount('<button v-copy.selection>Copy</button>')
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('live')
+    field.remove()
+    unmount()
+  })
+
+  it('never reads a password field', async () => {
+    const field = document.createElement('input')
+    field.type = 'password'
+    field.value = 'hunter2-secret'
+    document.body.appendChild(field)
+    field.focus()
+    field.setSelectionRange(0, 7)
+
+    const { el, unmount } = mount('<button v-copy.selection>Copy</button>')
+    const refused = onceResult(el)
+    el.click()
+    expect((await refused).error).toBe('empty')
+    expect(writeText).not.toHaveBeenCalled()
+    field.remove()
+    unmount()
+  })
+
+  it('copies on Enter from the keyboard, with no press to capture', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<span v-copy.selection>Copy selection</span>')
+    expect(el.getAttribute('tabindex')).toBe('0')
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('quick')
+    unmount()
+  })
+
+  it('the config form is the modifier', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<button v-copy="{ selection: true }">Copy</button>')
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('quick')
+    unmount()
+  })
+
+  it('replaces an explicit source', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<button v-copy="{ source: \'literal\', selection: true }">Copy</button>')
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('quick')
+    unmount()
+  })
+
+  it('replaces the "not here yet" meaning of a nullish source', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<button v-copy="{ source: token, selection: true }">Copy</button>', {
+      token: ref<string | null>(null),
+    })
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('quick')
+    unmount()
+  })
+
+  it('.trim is still the consumer\'s call, and it applies', async () => {
+    const text = paragraph('  padded  ')
+    selectText(text, 0, 10)
+    const bare = mount('<button v-copy.selection>Copy</button>')
+    bare.el.click()
+    await flush()
+    expect(writeText).toHaveBeenLastCalledWith('  padded  ')
+    bare.unmount()
+
+    selectText(text, 0, 10)
+    const trimmed = mount('<button v-copy.selection.trim>Copy</button>')
+    trimmed.el.click()
+    await flush()
+    expect(writeText).toHaveBeenLastCalledWith('padded')
+    trimmed.unmount()
+  })
+
+  it('lands in the history, newest-first, with dedupe promoting a repeat', async () => {
+    const text = paragraph()
+    const hist = ref<string[]>([])
+    const { el, unmount } = mount('<button v-copy.selection="hist">Copy</button>', { hist })
+
+    selectText(text, 4, 9) // quick
+    el.click(); await flush()
+    selectText(text, 10, 15) // brown
+    el.click(); await flush()
+    selectText(text, 4, 9) // quick again
+    el.click(); await flush()
+
+    expect(hist.value).toEqual(['quick', 'brown'])
+    unmount()
+  })
+
+  it('feeds the copied-feedback state and the copy-result event like any other source', async () => {
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<button v-copy.selection>Copy</button>')
+    const result = onceResult(el)
+    el.click()
+    const detail = await result
+    expect(detail).toMatchObject({ success: true, text: 'quick' })
+    expect(el.hasAttribute('data-copied')).toBe(true)
+    unmount()
+  })
+
+  it('a programmatic copy uses the captured selection too', async () => {
+    const text = paragraph()
+    const ctrl = reactive<CopyController>({ selection: true, trigger: false })
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<button v-copy="ctrl">Copy</button>', { ctrl })
+
+    press(el)
+    clearSelection() // the consumer's own @click handler runs after the collapse
+    const result = await ctrl.copy!()
+
+    expect(result.text).toBe('quick')
+    expect(writeText).toHaveBeenCalledWith('quick')
+    unmount()
+  })
+
+  it('detaches the press listener when the binding stops asking for a selection', async () => {
+    const text = paragraph()
+    const ctrl = reactive<CopyController>({ selection: true })
+    const { el, unmount } = mount('<button v-copy="ctrl">the label</button>', { ctrl })
+    const remove = vi.spyOn(el, 'removeEventListener')
+
+    ctrl.selection = false
+    expect(remove.mock.calls.map((c) => c[0])).toContain('mousedown')
+
+    selectText(text, 4, 9)
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('the label') // back to textContent
+    unmount()
+  })
+})
+
+// ===========================================================================
+// COPY-7. `via` names the strategy that RAN. Four paths write nothing at all,
+// and every one of them used to report `'exec-command'` — which is what a
+// consumer counting legacy-fallback copies would have been reading.
+// ===========================================================================
+describe("CopyResult.via — 'none' when no strategy ran", () => {
+  it('a disabled binding reports none', async () => {
+    const ctrl = reactive<CopyController>({ source: 'x', disabled: true })
+    const { unmount } = mount('<button v-copy="ctrl">c</button>', { ctrl })
+    const result = await ctrl.copy!()
+    expect(result).toMatchObject({ success: false, via: 'none', error: 'disabled' })
+    expect(writeText).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('an empty refusal reports none', async () => {
+    const { el, unmount } = mount('<button v-copy="\'\'">c</button>')
+    const result = onceResult(el)
+    el.click()
+    expect(await result).toMatchObject({ via: 'none', error: 'empty' })
+    unmount()
+  })
+
+  it('a pending refusal reports none', async () => {
+    const { el, unmount } = mount('<button v-copy="token">c</button>', { token: ref<string | null>(null) })
+    const result = onceResult(el)
+    el.click()
+    expect(await result).toMatchObject({ via: 'none', error: 'pending' })
+    unmount()
+  })
+
+  it('a controller with no bound element reports none', async () => {
+    const ctrl = reactive<CopyController>({ source: 'x' })
+    const { unmount } = mount('<button v-copy="ctrl">c</button>', { ctrl })
+    unmount() // the only driver is gone; `copy()` survives on the object
+    const result = await ctrl.copy!()
+    expect(result).toMatchObject({ success: false, via: 'none', error: 'no bound element' })
+  })
+
+  it('the SSR branch reports none', async () => {
+    vi.stubGlobal('window', undefined)
+    try {
+      expect(await runCopy('x')).toMatchObject({ ok: false, via: 'none' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('a real copy still names its strategy — both of them', async () => {
+    const api = mount('<button v-copy="\'via-api\'">c</button>')
+    const apiResult = onceResult(api.el)
+    api.el.click()
+    expect((await apiResult).via).toBe('clipboard-api')
+    api.unmount()
+
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, writable: true, configurable: true })
+    vi.spyOn(document, 'execCommand').mockReturnValue(true)
+    const legacy = mount('<button v-copy="\'via-legacy\'">c</button>')
+    const legacyResult = onceResult(legacy.el)
+    legacy.el.click()
+    expect((await legacyResult).via).toBe('exec-command')
+    legacy.unmount()
   })
 })

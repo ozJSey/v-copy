@@ -2,9 +2,15 @@
  * Binding resolution — every accepted binding form (bare / string / number /
  * history array / config object / controller / `false`) collapses to one
  * `Resolved` shape, with plugin defaults applied.
+ *
+ * This module also draws the ONE line that keeps the two object roles apart:
+ * a **config** object belongs to the consumer and the directive only reads it;
+ * a **controller** is a mutable reactive object the library is allowed to own
+ * and write state into. See `isController` below.
  */
-import type { DirectiveBinding } from 'vue'
+import { isReactive, isReadonly, type DirectiveBinding } from 'vue'
 import { getGlobalDefaults } from './defaults'
+import { takeSelectionText } from './selection'
 import type {
   CopyBinding,
   CopyConfig,
@@ -15,10 +21,22 @@ import type {
   DedupeConfig,
   DedupeScope,
   FeedbackConfig,
+  SelectionWithin,
 } from './types'
 
 /** Sentinel meaning "read the element's live `textContent` at copy time". */
 export const TEXT_CONTENT = Symbol('v-copy:textContent')
+
+/**
+ * Sentinel meaning "read what the USER has highlighted at copy time".
+ *
+ * A sentinel rather than a magic `source: 'selection'` string, deliberately: a
+ * bare string binding is ALWAYS a literal source in this package
+ * (`v-copy="'selection'"` copies the word), and inferring a role from a value's
+ * shape is the exact mistake ARCHITECTURE.md's ownership invariant exists to
+ * forbid. The consumer says `.selection` or `selection: true`; nothing is guessed.
+ */
+export const SELECTION = Symbol('v-copy:selection')
 
 const FEEDBACK_DEFAULTS = { className: 'v-copy-copied', duration: 1500, attribute: 'data-copied' } as const
 
@@ -33,11 +51,42 @@ const COMPARATORS: Record<DedupeCompare, DedupePredicate> = {
   loose: (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase(),
 }
 
-export type MutableController = CopyController
+/**
+ * Config or controller? Asked of the object itself, never of its shape.
+ *
+ * The controller role is "observable state the library keeps up to date", and
+ * that is only possible on a **mutable reactive** object: a plain literal is
+ * re-created every render so nothing can observe a write into it, and a frozen
+ * or `readonly()` object refuses the write outright (`reactive()` on a frozen
+ * object hands the frozen object straight back, so `isReactive` is false for
+ * it). Everything that is not a controller is read-only config — the directive
+ * never adds a key to it.
+ */
+function isController(v: object): boolean {
+  return isReactive(v) && !isReadonly(v)
+}
+
+/**
+ * Binding values cross an untyped boundary: a template expression is not
+ * type-checked at runtime, and `v-model.number` on an emptied `<input>` writes
+ * `''`, not `undefined`. `Number('')` is `0`, which would silently clamp a cap
+ * to 1 or turn a feedback window off — so anything that is not a real number
+ * means "not set", and the caller's default applies.
+ */
+function asNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isNaN(value) ? null : value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value)
+    return Number.isNaN(n) ? null : n
+  }
+  return null
+}
 
 export interface Resolved {
   disabled: boolean
-  source: string | number | (() => string) | typeof TEXT_CONTENT
+  source: string | number | (() => string) | typeof TEXT_CONTENT | typeof SELECTION
+  /** Scope for a `SELECTION` source. `undefined` = anywhere in the document. */
+  within: SelectionWithin | undefined
   trim: boolean
   sink: CopyEntry[] | null
   rich: boolean
@@ -51,7 +100,8 @@ export interface Resolved {
   onCopy?: (r: CopyResult) => void
   onSuccess?: (r: CopyResult) => void
   onError?: (r: CopyResult) => void
-  controllerObj: MutableController | null
+  /** The bound controller, when the binding was a mutable reactive object. */
+  controller: CopyController | null
   prevent: boolean
   stop: boolean
   once: boolean
@@ -63,17 +113,18 @@ export interface Resolved {
   pending: boolean
 }
 
-export function clampMax(value: number | undefined, fallback: number): number {
-  if (value == null || Number.isNaN(value)) return fallback
-  return Math.max(1, Math.floor(value))
+/** `unknown`, not `number | undefined`: see `asNumber` — the value is untyped at runtime. */
+function clampMax(value: unknown, fallback: number): number {
+  const n = asNumber(value)
+  return n === null ? fallback : Math.max(1, Math.floor(n))
 }
 
 function resolveFeedback(value: boolean | FeedbackConfig | undefined): Feedback | false {
   if (value === false) return false
   if (value === true || value == null) return { ...FEEDBACK_DEFAULTS }
-  const merged = { ...FEEDBACK_DEFAULTS, ...value }
-  if (merged.duration <= 0) return false
-  return merged
+  const duration = asNumber(value.duration) ?? FEEDBACK_DEFAULTS.duration
+  if (duration <= 0) return false
+  return { ...FEEDBACK_DEFAULTS, ...value, duration }
 }
 
 function resolveDedupe(value: boolean | DedupeConfig | undefined): DedupePredicate | null {
@@ -103,16 +154,16 @@ export function resolveBinding(binding: DirectiveBinding<CopyBinding>): Resolved
 
   if (v === false) {
     return {
-      disabled: true, source: TEXT_CONTENT, trim: false, sink: null, rich: false,
-      max: 10, dedupe: null, dedupeScope: 'text', key: undefined, feedback: false,
-      announce: false, trigger: false, controllerObj: null, pending: false, ...mods,
+      disabled: true, source: TEXT_CONTENT, within: undefined, trim: false, sink: null,
+      rich: false, max: 10, dedupe: null, dedupeScope: 'text', key: undefined, feedback: false,
+      announce: false, trigger: false, controller: null, pending: false, ...mods,
     }
   }
 
   let cfg: CopyConfig = {}
   let source: Resolved['source'] = TEXT_CONTENT
   let sink: CopyEntry[] | null = null
-  let controllerObj: MutableController | null = null
+  let controller: CopyController | null = null
   let pending = false
 
   if (v === undefined) {
@@ -134,9 +185,12 @@ export function resolveBinding(binding: DirectiveBinding<CopyBinding>): Resolved
     // An array is ALWAYS a history sink — copy textContent, record into it.
     sink = v
   } else {
-    // A plain object is config + controller.
+    // An object is always config. It is ALSO a controller when the library is
+    // allowed to own it — see `isController`. A config object is read here and
+    // never written to, so freezing one, or passing a `readonly()` view of one,
+    // is an ordinary binding rather than a crash at mount.
     cfg = v
-    controllerObj = v as MutableController
+    if (isController(v)) controller = v as CopyController
     // An explicitly present-but-absent `source` is the same "not here yet" as a
     // `null` binding, and here it IS distinguishable from omitting the key —
     // which is why this is the form to reach for when a value may be missing.
@@ -145,9 +199,21 @@ export function resolveBinding(binding: DirectiveBinding<CopyBinding>): Resolved
     sink = cfg.sink ?? null
   }
 
+  // The user's own selection replaces the source outright — including the
+  // "not here yet" meaning of a nullish one, which describes a value this
+  // binding has stopped copying. Enabled by the `.selection` modifier or by
+  // `selection: true | { within }`, never inferred from a value.
+  const selection = m.selection || cfg.selection
+  const within = typeof cfg.selection === 'object' && cfg.selection !== null ? cfg.selection.within : undefined
+  if (selection) {
+    source = SELECTION
+    pending = false
+  }
+
   return {
     disabled: !!cfg.disabled,
     source,
+    within,
     trim: !!m.trim,
     sink,
     rich: !!(m.rich || cfg.rich),
@@ -161,7 +227,7 @@ export function resolveBinding(binding: DirectiveBinding<CopyBinding>): Resolved
     onCopy: cfg.onCopy,
     onSuccess: cfg.onSuccess,
     onError: cfg.onError,
-    controllerObj,
+    controller,
     pending,
     ...mods,
   }
@@ -169,6 +235,13 @@ export function resolveBinding(binding: DirectiveBinding<CopyBinding>): Resolved
 
 export function resolveText(el: HTMLElement, r: Resolved): string {
   if (r.source === TEXT_CONTENT) return (el.textContent ?? '').trim() // textContent is always trimmed
-  const raw = typeof r.source === 'function' ? String(r.source()) : String(r.source)
+  // `.trim` still applies: the user selected those characters, so trimming them
+  // has to stay something the consumer asks for rather than something we do.
+  const raw =
+    r.source === SELECTION
+      ? takeSelectionText(el, r.within)
+      : typeof r.source === 'function'
+        ? String(r.source())
+        : String(r.source)
   return r.trim ? raw.trim() : raw
 }

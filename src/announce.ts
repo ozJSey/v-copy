@@ -6,7 +6,10 @@ let liveRegion: HTMLElement | null = null
 
 export function announce(message: string): void {
   if (typeof document === 'undefined' || !document.body) return
-  if (!liveRegion) {
+  // Cached by reference AND checked for connectedness: an app that re-mounts
+  // its root, a test harness, or a "remove stray nodes" pass can detach the
+  // region, and announcing into an orphan is silence with no signal.
+  if (!liveRegion || !liveRegion.isConnected) {
     liveRegion = document.createElement('div')
     liveRegion.setAttribute('aria-live', 'polite')
     liveRegion.setAttribute('role', 'status')

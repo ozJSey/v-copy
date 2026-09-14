@@ -4,7 +4,7 @@
  */
 import type { CopyVia } from './types'
 
-export function isBrowser(): boolean {
+function isBrowser(): boolean {
   return typeof window !== 'undefined' && typeof document !== 'undefined'
 }
 
@@ -30,7 +30,7 @@ function execCommandCopy(text: string): void {
 }
 
 export async function runCopy(text: string): Promise<{ ok: boolean; via: CopyVia; error?: string }> {
-  if (!isBrowser()) return { ok: false, via: 'exec-command', error: 'unavailable: no DOM (SSR)' }
+  if (!isBrowser()) return { ok: false, via: 'none', error: 'unavailable: no DOM (SSR)' }
   // Prefer the async Clipboard API, but fall back on BOTH absence AND rejection
   // (denied permission, insecure context, missing user gesture). The rejection
   // path is why we don't pre-check `isSecureContext` — the catch covers it.

@@ -3,6 +3,179 @@
 All notable changes to **@ozjsey/v-copy** are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## 1.2.0
+
+### Added — `v-copy.selection`: copy what the **user** highlighted
+
+```vue
+<p>Ada Lovelace wrote the first algorithm intended for a machine, in 1843.</p>
+<button v-copy.selection>Copy selection</button>
+```
+
+A selection is just another source, so it feeds the history, the `dedupe` promotion, `.rich`
+entries, the `[data-copied]` window, the announcement and `copy-result` exactly like a string
+binding does. `v-copy="{ selection: true }"` is the config form; `{ selection: { within } }` scopes
+it.
+
+**The press destroys the selection, which is the whole difficulty.** Measured in Chrome 153 with
+trusted input, dragging a real selection and clicking a real trigger:
+
+| Trigger host | Selection at `click` time |
+|---|---|
+| `<button>` | intact |
+| `<span>` / `<div>` — what this directive makes copyable | **gone**, collapsed between `mousedown` and `mouseup` |
+
+So the selection is **captured on `pointerdown`**, before the browser's default action collapses it,
+and used only when the live selection has gone empty by copy time; the capture is consumed once per
+press. `preventDefault()` on `mousedown` would also have worked and was rejected: it additionally
+suppresses focus on the trigger (measured — `activeElement` stays on `<body>`), which is an
+accessibility cost on every binding to fix a mouse-only problem, and it does nothing for the
+keyboard. The keyboard path needs no capture: Tab leaves the document selection in place, so
+Shift+Arrow → Tab → Enter reads it live.
+
+- **What is copied is `getSelection().toString()`** — exactly what ⌘C would have produced, including
+  the separators an engine inserts at block and cell boundaries. They are not normalised. This is
+  deliberately the opposite of `v-select-text`'s conclusion, where the package owns a competing
+  resolved view and `toString()` would mean reporting one string and writing another.
+- **An empty selection is refused**, with `error: 'empty'` — nothing selected, a collapsed caret, or
+  a `user-select: none` region, which stringifies to `""`. Writing that would clear the user's
+  clipboard. A one-time console warning names the selection case.
+- **`within` scopes it.** The default is the whole document (⌘C parity — a page has one selection).
+  `within: '.card'` resolves the nearest matching ancestor, else the first match in the document;
+  `within: true` is the bound element. A selection that *spans* the container is out of scope rather
+  than clipped, and a selector matching nothing refuses rather than widening back to the document.
+- **A focused `<input>` / `<textarea>` is read directly.** Not every engine mirrors a field's
+  selection into the document selection — Chrome does, Firefox and Safari do not, per the split
+  `v-select-text` documents — so without this the feature would copy an input in one engine and
+  nothing in the others. Measured here in Chrome and in jsdom, which behaves like the latter.
+  `type="password"` is never read.
+- **Not a copy:** dragging out a selection *inside* a copyable host does not copy it. Chrome does
+  not fire `click` for a press-drag-release that made a selection, so highlighting inside
+  `<blockquote v-copy.selection>` stays a highlight until you click it.
+- **Known limit:** tabbing out of a field discards its selection — no engine keeps it as the
+  document's current one — so Shift+Arrow in an `<input>` → Tab → Enter copies nothing. Press the
+  trigger with the pointer, or select in a `contenteditable`, where the selection survives Tab.
+- New exported types: `SelectionConfig`, `SelectionWithin`. New config key `selection`, new
+  modifier `.selection`, which replaces the source outright — including the "not here yet" meaning
+  of a nullish `source`.
+
+Verified in a real browser, not only in jsdom: eleven checks in the playground's interaction suite
+drag a real selection with `Input.dispatchMouseEvent`, press a real trigger and read the **real**
+clipboard back over a primed sentinel. Removing the capture turns six of them red; removing the
+empty-refusal turns the clipboard-wipe into an observed fact, on the real clipboard.
+
+### Changed — `CopyVia` gained `'none'`
+
+**This widens a union you may be reading.** An exhaustive `switch (result.via)` over the two old
+members now fails to compile (`TS2366` / no-fallthrough), which is the intended signal — it is why
+this waited for a minor instead of riding along in 1.1.1.
+
+The four paths that write nothing reported `via: 'exec-command'`, a filler that happened to
+type-check: a refusal (`'empty'` / `'pending'`), a disabled binding, the SSR branch, and
+`ctrl.copy()` with no bound element. Anything counting legacy-fallback copies — the exact signal
+someone would use to decide whether the `execCommand` path can be dropped — was reading a wave of
+refusals as `execCommand` copies on modern browsers. All four now report `'none'`; a copy that
+really ran still reports `'clipboard-api'` or `'exec-command'`, including an `execCommand` that
+ran and failed.
+
+### Internals
+
+- New module `src/selection.ts` — reading the user's selection, the scope resolution, and the
+  press-time snapshot. It is the only place `getSelection()` is touched.
+- `events.ts` attaches the capture-phase press listener (`pointerdown`, or `mousedown` where
+  `PointerEvent` does not exist — one or the other, never both: a touch's compatibility `mousedown`
+  arrives after the selection is already gone and would overwrite a good snapshot with an empty one).
+- 126 tests, up from 98. Every new behaviour was mutation-tested: twelve deliberate breaks, each
+  caught by the test that names it.
+
+## 1.1.1
+
+### Fixed — a crash at mount
+
+**`v-copy` bound to a frozen or `readonly()` config object threw out of `mounted` and took the
+component down with it.**
+
+```
+TypeError: Cannot add property history, object is not extensible      // Object.freeze(config)
+TypeError: Cannot read properties of undefined (reading '0')          // readonly(reactive(config))
+```
+
+If your app died at mount with either of those, on a component whose only copy binding was
+`v-copy="SOME_CONFIG"`, this is the bug. Nothing in the message named the directive, and neither
+binding is exotic: freezing a module-level config object is ordinary defensive practice, and passing
+a `readonly()` prop or injected value is idiomatic Vue.
+
+**Cause.** Every plain object binding was adopted as a mutable controller, so the directive wrote
+`history`, `copied`, `last`, `copy` and `clear` into whatever object you passed. On a frozen object
+the first write was refused; on a `readonly()` one it was refused and warned; either way the next
+line dereferenced the result.
+
+**Fix — the two roles are now distinct, and the distinction is asked of the object, not guessed
+from its keys.**
+
+- A **config** object belongs to you. The directive reads it and writes nothing into it — ever. A
+  frozen config, a `readonly()` view, a shared module constant and an inline `{ ... }` literal are
+  all ordinary bindings now.
+- A **controller** is a *mutable reactive* object — `isReactive(v) && !isReadonly(v)`. That is the
+  documented form (`reactive<CopyController>({})`), it is the only form on which the exposed state
+  could ever be observed, and it is now the opt-in rather than a recommendation.
+
+### Changed — behaviour
+
+- **A plain (non-reactive) object binding is no longer enriched.** If you bound a plain object and
+  called `ctrl.copy()` from script, wrap it in `reactive()`. A plain literal in a template was never
+  usable as a controller — it is re-created every render, so nothing could observe a write into it —
+  but it *was* being written to, which is what this release stops.
+- **A config binding no longer invents a history.** Previously every object binding silently became
+  a history sink, which also fired `` `key`/argument is ignored for string history `` at bindings
+  that had no history — spending the one-shot warning so a real mistake later printed nothing.
+- **A controller's config half is live.** `ctrl.disabled = true`, `ctrl.trigger = 'dblclick'`,
+  `ctrl.max = 3` and `ctrl.sink = otherArray` take effect immediately. Until now the options were a
+  render snapshot: `ctrl.disabled = true` kept copying until something unrelated re-rendered the
+  host, which made it look intermittent.
+- **`ctrl.sink` is re-read.** Swapping it re-points the history instead of being ignored after the
+  first render.
+- **`ctrl.last` mirrors the head of the history**, whichever binding wrote it, instead of only
+  tracking copies made through that same object. In the README's own picker pattern — rows bound as
+  `{ source: entry, sink: clipboard.history }` — `clipboard.last` froze at the first value while the
+  list above it updated correctly.
+- **A controller bound while `disabled` still receives `copy()` / `clear()` / `history`**, and
+  `ctrl.copy()` now returns the documented `error: 'disabled'` instead of being `undefined`.
+- **`.once` stays detached.** The latch detached the listeners and then the next re-render put them
+  back, along with `tabindex="0"` and `role="button"` — leaving an element announced as a button,
+  focusable and wired, that copied nothing.
+- **A key-shaped `trigger` copies once per press.** `trigger: 'keydown'` attached the built-in
+  Enter/Space handler on top of the trigger listener, so one Enter produced two clipboard writes,
+  two `copy-result` events and two callback runs.
+- **`max` and `feedback.duration` survive an emptied number input.** `v-model.number` writes `''`
+  when the field is cleared: `max` collapsed a six-entry history to one row, and a cleared duration
+  turned the copied state off for good. A non-numeric value now means "not set" and the default
+  applies. `max: 'lots'` no longer removes the cap entirely (it became `NaN`, and `length > NaN` is
+  false).
+- **The `aria-live` region is re-created if something detaches it.** It was cached by reference for
+  the life of the page, so a root re-mount or a DOM cleanup pass silently ended announcements for
+  the rest of the session.
+
+### Changed — internals
+
+- `execute.ts` refuses a pending binding **before** resolving text, retiring an unreachable ternary
+  arm whose only job was to type-check — and whose presence made the refusal order load-bearing but
+  unstated.
+- `vCopy.ts` re-exports `src/index.ts` with a wildcard. The duplicated export list was a way for a
+  type to exist in the source and be missing from the published `.d.ts` with nothing failing.
+- Added `npm run typecheck` (`tsc --noEmit`) over `src/`, the entry and the test file; the test file
+  was previously outside `tsconfig.json`'s `include` and never type-checked.
+- Removed the `MutableController` alias (identical to `CopyController`, and it named a mutability
+  boundary the type did not express) and un-exported `clampMax` / `isBrowser`, which nothing outside
+  their own modules called.
+- 97 tests, up from 75.
+
+### Known, not fixed in this release
+
+- `CopyResult.via` reports `'exec-command'` on paths where no strategy ran (a refusal, a disabled
+  binding, SSR). Honest reporting needs a new member on the `CopyVia` union, which is not a patch.
+  Documented on the type in the meantime — check `success` / `error` first.
+
 ## 1.1.0
 
 First release under the **`@ozjsey`** scope. The unscoped `v-copy` on npm is a different package

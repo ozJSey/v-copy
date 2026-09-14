@@ -1,6 +1,6 @@
 {
   "name": "@ozjsey/v-copy",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Vue 3 directive that copies any element — and keeps the last N copies so your users can pick one back out. Copy history with de-duplication, a copied-feedback state, slot-like reactive state, keyboard + a11y, and an automatic clipboard fallback. Zero dependencies.",
   "author": "Ozgur Seyidoglu",
   "license": "MIT",
@@ -25,7 +25,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public"
@@ -33,6 +34,7 @@
   "scripts": {
     "build": "tsup vCopy.ts --format esm --minify --dts --out-dir dist --clean && mv dist/vCopy.js dist/vCopy.min.js",
     "test": "vitest run",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

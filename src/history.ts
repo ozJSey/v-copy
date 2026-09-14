@@ -1,6 +1,7 @@
 /**
  * History recording — pushes copies into the bound sink array (newest-first,
- * capped at `max`) and keeps the controller's `last` in sync.
+ * capped at `max`) and mirrors the new head into every controller that points
+ * at that array.
  *
  * De-duplication happens HERE, on write. The bound array belongs to the
  * consumer, so there is nowhere to hang a derived read-time view; `max` has to
@@ -13,6 +14,7 @@
  * with it. `dedupe: { scope: 'key' }` is the opt-out, and the default path warns
  * once the first time a labelled entry is actually discarded.
  */
+import { syncLast } from './controller'
 import type { Resolved } from './resolve'
 import type { CopyEntry, CopyResult, RichCopyEntry } from './types'
 import { warnOnce } from './warn'
@@ -70,5 +72,8 @@ export function record(r: Resolved, result: CopyResult): void {
 
   sink.unshift(entry)
   if (sink.length > r.max) sink.splice(r.max) // dedupe first, THEN the cap: a promotion never costs a slot
-  if (r.controllerObj) r.controllerObj.last = sink[0]
+  // `last` belongs to the array, not to whoever copied: every controller that
+  // points at this sink mirrors its head, so a row picked out of a shared
+  // history updates the controller that renders it.
+  syncLast(sink)
 }

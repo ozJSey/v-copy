@@ -8,7 +8,7 @@ Try the live examples in the [npm portfolio playground](https://github.com/ozJSe
 
 [![npm](https://img.shields.io/npm/v/@ozjsey/v-copy.svg)](https://www.npmjs.com/package/@ozjsey/v-copy)
 ![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![gzipped 3.33 KiB](https://img.shields.io/badge/gzipped-3.33%20KiB-blue.svg)
+![gzipped 4.37 KiB](https://img.shields.io/badge/gzipped-4.37%20KiB-blue.svg)
 ![dependencies 0](https://img.shields.io/badge/dependencies-0-blue.svg)
 
 **A Vue 3 directive that copies any element — and keeps the last N copies so your users can pick one
@@ -87,6 +87,9 @@ was copied* is part of your UI.
   with the same row.
 - ♻️ **Re-copy** — because the history is a plain array you own, each entry can carry its own
   `v-copy`, which is all a history picker is.
+- 🖱️ **Copies the user's own selection** — `v-copy.selection` puts whatever they highlighted on
+  the clipboard, surviving the press that would otherwise destroy it. Scope it to a card with
+  `within`. See [Copy what the user selected](#copy-what-the-user-selected).
 - 📋 **Copies the `textContent` of any element** on click — not just inputs, no handler, no `ref`.
 - 🎛️ **Slot-like state** — bind a `reactive` object and read `copied` / `history` / `last`, call
   `copy()` and `clear()`. No composable.
@@ -96,13 +99,20 @@ was copied* is part of your UI.
   reported as a failure instead. See [Nothing to copy](#nothing-to-copy).
 - 🔁 **Automatic fallback** — Clipboard API → `execCommand`, on both absence *and* rejection. SSR-safe.
 - 🧩 **Typed** — `v-copy` autocompletes in `<template>` (Vue 3.3+); every binding form is typed.
-- **Zero dependencies**, 3.33 KiB gzipped.
+- **Zero dependencies**, 4.37 KiB gzipped.
 
 ## Install
 
 ```bash
 npm install @ozjsey/v-copy
 ```
+
+> **Upgrading from 1.1.0?** If your component died at mount with
+> `TypeError: Cannot add property history, object is not extensible` or
+> `TypeError: Cannot read properties of undefined (reading '0')`, that was this package: every
+> object binding was adopted as a mutable controller, so a frozen or `readonly()` config object was
+> written to and threw. Fixed in **1.1.1** — a config object is now only ever read. See the
+> [changelog](./CHANGELOG.md).
 
 ### Global registration (plugin)
 
@@ -162,7 +172,7 @@ prior entry with the same text is removed and a fresh one is unshifted to the to
 
 De-duplication runs **before** the cap, so a promotion never costs a `max` slot:
 
-```
+```text
 max: 5, history [e, d, c, b, a], re-copy "c"
   dedupe (default) →  [c, e, d, b, a]     "a" survives
   dedupe: false    →  [c, e, d, c, b]     "a" evicted by the duplicate
@@ -264,6 +274,124 @@ Pass a string/number to copy something other than the visible text:
 <button v-copy="{ source: () => Date.now() }">Copy time</button>
 ```
 
+### Copy what the user selected
+
+`v-copy.selection` copies whatever the **user** highlighted — with the mouse, or with Shift+Arrow —
+instead of the element's own text.
+
+```vue
+<p>Ada Lovelace wrote the first algorithm intended for a machine, in 1843.</p>
+<button v-copy.selection>Copy selection</button>
+```
+
+Everything else keeps working: the selection is just another source, so it feeds the history, the
+`dedupe` promotion, `.rich` entries, the `[data-copied]` window, the `aria-live` announcement and
+`copy-result` exactly like a string binding does.
+
+```vue
+<button v-copy.selection="clips">Copy selection</button>   <!-- clips: ref<string[]>([]) -->
+```
+
+**What gets copied is `getSelection().toString()`** — precisely what ⌘C would have produced. That
+includes the separators an engine inserts at block and table-cell boundaries: a selection spanning
+two paragraphs arrives with a line break between them, and exactly how much whitespace is the
+engine's call. It is not normalised — normalising would hand back a string the user did not
+highlight.
+
+> This is deliberately the **opposite** of the call `v-select-text` makes. There the directive
+> *makes* the selection, so it holds a resolved view of it, and copying `toString()` would mean
+> reporting one string and writing another. Here the user's own selection is the only view there is.
+
+#### The press destroys the selection — and that is handled
+
+Pressing a trigger collapses the document selection *before* your click handler runs, so reading
+`getSelection()` in the handler finds nothing. Measured in Chrome 153 with real (trusted) input, dragging
+a real selection and clicking a real trigger:
+
+| Trigger host | Selection at `click` time |
+|---|---|
+| `<button>` | intact |
+| `<span>`, `<div>`, … (what `v-copy` makes copyable) | **gone** — collapsed between `mousedown` and `mouseup` |
+
+So the directive **captures the selection on `pointerdown`**, before the browser's default action
+collapses it, and uses the capture only when the live selection has gone empty by copy time. The
+capture is consumed once per press: it rescues *this* gesture, never a stale one.
+
+The alternative — `preventDefault()` on `mousedown` — also preserves the selection, and is rejected
+on purpose: its other effect is that **focus never moves to the trigger** (measured: `activeElement`
+stays on `<body>` after the click). A control the user just activated that does not take focus breaks
+`:focus-visible`, breaks a screen reader's idea of where the user is, and breaks `focus`/`blur`
+handlers — an accessibility cost on every binding, to fix a mouse-only problem. It is also not the
+directive's call to make on your behalf. If you want it, it is one line in your own handler.
+
+**Selecting inside a copyable host is not a copy.** Chrome does not fire `click` for a
+press-drag-release that made a selection, so dragging out a highlight inside
+`<blockquote v-copy.selection>` leaves it highlighted; the click after it is what copies.
+
+**The keyboard path needs none of this.** Moving focus with Tab leaves the document selection in
+place, so Shift+Arrow → Tab → Enter reads it live. Non-interactive hosts already get
+`tabindex="0"` + `role="button"` + Enter/Space from the directive.
+
+#### An empty selection is refused
+
+Nothing selected, a collapsed caret, or a `user-select: none` region — which stringifies to `""` —
+is **refused**, not written: writing `""` would clear the user's clipboard while the UI flashed
+"Copied!". Same rule, same reporting and same `error: 'empty'` as everywhere else in this package
+(see [Nothing to copy](#nothing-to-copy)); a one-time console warning names the selection case.
+
+#### Whose selection? `within`
+
+The default is **the whole document**, because that is what ⌘C does — a page has one selection, and
+the platform never asks which card you meant. A page-level "copy what I selected" button therefore
+needs no configuration at all.
+
+`within` narrows it, and a copy button living inside a card is the reason it exists:
+
+```vue
+<article class="card">
+  <p>Ada Lovelace · ada@lovelace.dev</p>
+  <button v-copy="{ selection: { within: '.card' } }">Copy this card's selection</button>
+</article>
+
+<blockquote v-copy="{ selection: { within: true } }">…</blockquote>
+```
+
+| `within` | Container |
+|---|---|
+| *(omitted)* | Anywhere in the document — ⌘C parity. |
+| `true` | The bound element itself. |
+| `'.card'` | The nearest matching **ancestor** (`el.closest`), else the first match in the document — so a toolbar button outside the panel it acts on still works. |
+| an `Element` | That container. |
+
+The whole selection has to be inside: one that *spans* the container is out of scope rather than
+clipped, because a clipped string is not what the user highlighted. A selector matching **nothing**
+refuses the copy rather than falling back to the whole document — a scope that silently widens would
+copy text the binding explicitly said it did not want.
+
+#### Text fields, and what it cannot do
+
+A focused `<input>` / `<textarea>` keeps its selection in its own value, and **not every engine
+mirrors that into the document selection** — Chrome does, Firefox and Safari do not (the split
+`v-select-text` documents; measured here only in Chrome and jsdom, which behaves like the latter).
+So `v-copy` reads the focused field directly, and copying what you selected in an input behaves the
+same either way. `type="password"` is deliberately never read: whatever the browser does with ⌘C
+there, a copy directive should not be the most permissive route on the page to a password field's
+contents.
+
+Two honest limits:
+
+- **Tabbing out of a field discards its selection.** Once focus has left, the field's selection is
+  no longer the document's current one in any engine, so Shift+Arrow in an `<input>` → Tab → Enter
+  copies nothing. Press the trigger with the pointer, or select in a `contenteditable` region, where
+  the selection *is* the document selection and survives Tab.
+- **A second press copies nothing.** On the hosts that collapse the selection, the first copy leaves
+  nothing selected, so pressing again is correctly refused — while on a `<button>`, where the
+  selection survives, it copies again. That difference is the browser's, not the directive's.
+
+`selection` replaces the source outright, including the "not here yet" meaning of a nullish
+`source` — that describes a value this binding has stopped copying. `v-copy.selection.trim` still
+trims, because trimming what someone highlighted has to stay something you ask for.
+
 ### Nothing to copy
 
 A copy directive that writes an empty string does not fail — it **clears the user's clipboard**, and
@@ -316,9 +444,17 @@ const ctrl = reactive<CopyController>({})
 several elements share one controller, pass the text explicitly — `ctrl.copy(value)` — or give each
 element its own binding.
 
-> ⚠️ `copied` / `history` are only observable when the bound object is `reactive`. An inline
-> `v-copy="{ ... }"` literal is re-created every render and won't track — use it for config, use a
-> `reactive` object when you want to read state back.
+> ⚠️ **`reactive()` is what makes it a controller.** It is the runtime question the directive asks
+> — a mutable reactive object is a controller the library owns and writes state into; a plain
+> literal, a frozen object or a `readonly()` view is config the library only reads and never
+> touches. So `v-copy="{ source: x }"` stays exactly the object you wrote, and
+> `v-copy="Object.freeze(CONFIG)"` is an ordinary binding. Bind `reactive({})` when you want
+> `copy()` / `copied` / `history` / `last` / `clear()` back.
+
+The config half of a controller is **live**: `ctrl.disabled = true`, `ctrl.trigger = 'dblclick'`,
+`ctrl.max = 3` and `ctrl.sink = otherArray` take effect immediately, without waiting for something
+else to re-render the host. A controller bound while `disabled` still gets its `copy()`, which
+reports `success: false` with `error: 'disabled'`.
 
 ### "Copied!" feedback (CSS-only)
 
@@ -352,7 +488,7 @@ the bare/string forms, and how a parent can collect an entire `v-for` subtree at
 
 ```ts
 function onAnyCopy(e: CustomEvent<CopyResult>) {
-  // { success, text, via: 'clipboard-api' | 'exec-command', key?, error? }
+  // { success, text, via: 'clipboard-api' | 'exec-command' | 'none', key?, error? }
 }
 ```
 
@@ -381,6 +517,7 @@ keyboard path along with everything else.
 | `.prevent` / `.stop` | `preventDefault()` / `stopPropagation()` on the trigger event. |
 | `.trim` | Trim an explicit/string source (`textContent` is always trimmed). |
 | `.rich` | Record rich `{ text, at, ok, key }` history entries. |
+| `.selection` | Copy the **user's** current text selection instead of the source. See [Copy what the user selected](#copy-what-the-user-selected). |
 
 ### Disable
 
@@ -392,8 +529,15 @@ keyboard path along with everything else.
 
 ### Aggregated copy — many selected rows, one payload
 
-The source is a `computed`, so the binding always reflects the current selection at copy time. Nothing
-here is special-cased in the library; it falls out of "the source can be a computed string".
+The source is a `computed`, so the binding is re-read whenever the selection changes the render.
+Nothing here is special-cased in the library; it falls out of "the source can be a computed string".
+
+> **What "at copy time" does and does not mean.** A string `source` is the value from the **last
+> render** — that is all a template expression can be. It is live here because `selected` drives the
+> render. If your source depends on something the render does not track (a `shallowRef`, an external
+> store, a non-reactive cache), pass the getter form instead — `v-copy="{ source: () => build() }"`
+> is called at the moment of the copy — or bind the element's own `textContent`, which is also read
+> live.
 
 ```vue
 <script setup lang="ts">
@@ -438,7 +582,8 @@ header-only block. Playground card 12 is the full version.
 2. Falls back to a temporary `<textarea>` + `document.execCommand('copy')` — automatically, on **both**
    the API being absent **and** it rejecting (denied permission, insecure context, no user gesture).
 
-`CopyResult.via` tells you which path ran. Everything is SSR-guarded.
+`CopyResult.via` tells you which path ran — or `'none'` when nothing was written at all: a refusal,
+a disabled binding, SSR, or `ctrl.copy()` with no bound element. Everything is SSR-guarded.
 
 ## TypeScript
 
@@ -449,7 +594,7 @@ All public types are exported:
 import type {
   CopyBinding, CopyConfig, FeedbackConfig, CopyEntry, RichCopyEntry,
   CopyResult, CopyVia, CopyController, CopyDirective, CopyPluginOptions,
-  DedupeCompare, DedupeConfig, DedupeScope,
+  DedupeCompare, DedupeConfig, DedupeScope, SelectionConfig, SelectionWithin,
 } from '@ozjsey/v-copy'
 ```
 
@@ -460,15 +605,17 @@ import type {
 | *(bare)* | Copy the element's `textContent`. |
 | `"some string"` / `42` | Copy that value (source override). |
 | `historyArray` | Copy `textContent`, record into the array (newest-first, capped). |
-| `reactiveController` | Config **and** slot-like state: `copy()` / `copied` / `history` / `last` / `clear()`. |
-| `{ source?, sink?, max?, dedupe?, rich?, feedback?, announce?, trigger?, disabled?, onCopy?, onSuccess?, onError?, key? }` | Full config. |
+| `reactive({...})` | Config **and** slot-like state: `copy()` / `copied` / `history` / `last` / `clear()`, kept live. |
+| `{ ...plain / frozen / readonly }` | Config only — read, never written to. |
+| `{ source?, selection?, sink?, max?, dedupe?, rich?, feedback?, announce?, trigger?, disabled?, onCopy?, onSuccess?, onError?, key? }` | Full config. |
 | `null` | Nothing to copy **yet** — the copy is refused rather than falling back to `textContent`. |
 | `false` | Disabled. |
 
 > **Note:** a single primitive `ref` (e.g. `ref('')`) or `defineModel<string>()` **cannot** be a
 > history target — in templates it arrives unwrapped as an immutable primitive, so there's nothing to
 > write back through, and the directive treats it as a *source override* instead. Use a
-> `ref<string[]>([])` (read `history[0]`) or a controller's `last`.
+> `ref<string[]>([])` (read `history[0]`) or a controller's `last` — which mirrors the head of the
+> history, whichever binding wrote it, so a value picked out of a shared history updates it too.
 
 ## Part of a set
 

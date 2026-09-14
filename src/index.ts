@@ -1,7 +1,7 @@
 /**
  * Public surface. Internal modules (warn, defaults, clipboard, announce,
- * resolve, state, history, controller, feedback, execute, events) stay
- * un-exported.
+ * resolve, selection, state, history, controller, feedback, execute, events)
+ * stay un-exported.
  */
 export { vCopy, default } from './directive'
 export { VCopyPlugin } from './plugin'
@@ -20,4 +20,6 @@ export type {
   DedupeScope,
   FeedbackConfig,
   RichCopyEntry,
+  SelectionConfig,
+  SelectionWithin,
 } from './types'
