@@ -2,9 +2,13 @@
 
 See in action: [npm portfolio playground](https://ozjsey.github.io/npm-portfolio-playground/#v-copy).
 
-## Playground
-
-Try the live examples in the [npm portfolio playground](https://github.com/ozJSey/npm-portfolio-playground).
+**Or open the card for the thing you came for** — seventeen of them, all editable in the browser:
+[bare binding](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/bare) ·
+[copy history](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/history) ·
+[the history picker](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/history-picker) ·
+[aggregated multi-select copy](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/multi-select) ·
+[copy the user's selection](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/user-selection) ·
+[slot-like controller](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/controller)
 
 [![npm](https://img.shields.io/npm/v/@ozjsey/v-copy.svg)](https://www.npmjs.com/package/@ozjsey/v-copy)
 ![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -23,6 +27,8 @@ it and press Enter — and its text is on the clipboard, with a "Copied!" state 
 announcement you did not have to write.
 
 ## The part nothing else does: a clipboard history
+
+> [Clipboard history picker — copy, re-open, copy again](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/history-picker) is this paragraph, running: copy a few values, open the teleported dropdown, pick one, and it goes back on the clipboard.
 
 Bind a `reactive` object and every copy is recorded. Render the history and each row copies *itself*
 back out — a clipboard manager, built from one directive.
@@ -166,6 +172,8 @@ the binding on update — mutating is the cheaper habit.)
 
 #### De-duplication (`dedupe`, on by default)
 
+> [dedupe scope](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/dedupe-scope) — one row per payload or one row per label, side by side, with [the history picker](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/history-picker) for what promotion looks like in a real list.
+
 A history that fills up with the same row is not a history. So a repeat copy **promotes**: every
 prior entry with the same text is removed and a fresh one is unshifted to the top — with a fresh
 `at` in `.rich` mode, so the list never sorts by recency while showing a stale timestamp.
@@ -276,6 +284,8 @@ Pass a string/number to copy something other than the visible text:
 
 ### Copy what the user selected
 
+> [Copy what the USER selected](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/user-selection) — highlight across elements and press the button; the selection survives the press.
+
 `v-copy.selection` copies whatever the **user** highlighted — with the mouse, or with Shift+Arrow —
 instead of the element's own text.
 
@@ -341,6 +351,8 @@ is **refused**, not written: writing `""` would clear the user's clipboard while
 
 #### Whose selection? `within`
 
+> [Whose selection is it — scoping with `within`](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/selection-scope).
+
 The default is **the whole document**, because that is what ⌘C does — a page has one selection, and
 the platform never asks which card you meant. A page-level "copy what I selected" button therefore
 needs no configuration at all.
@@ -393,6 +405,8 @@ Two honest limits:
 trims, because trimming what someone highlighted has to stay something you ask for.
 
 ### Nothing to copy
+
+> [Nothing to copy](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/nothing-to-copy) — an empty binding and a not-yet-loaded one, both refused rather than flashing "Copied!".
 
 A copy directive that writes an empty string does not fail — it **clears the user's clipboard**, and
 by default it would do so while flashing "Copied!". So it does not do that:
@@ -529,6 +543,8 @@ keyboard path along with everything else.
 
 ### Aggregated copy — many selected rows, one payload
 
+> [Multi-select rows → one copied context](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/multi-select). This is the package's wedge; it is worth watching rather than reading.
+
 The source is a `computed`, so the binding is re-read whenever the selection changes the render.
 Nothing here is special-cased in the library; it falls out of "the source can be a computed string".
 
@@ -567,6 +583,8 @@ const payload = computed(() => {
 header-only block. Playground card 12 is the full version.
 
 ## Accessibility
+
+> [Accessibility](https://ozjsey.github.io/npm-portfolio-playground/#v-copy/a11y) — Tab to a non-interactive host and press Enter.
 
 - A visually-hidden, shared `aria-live="polite"` region announces **"Copied"** on success by default.
   Customize with `announce: 'Email copied'`, or turn it off with `announce: false`. A refused copy

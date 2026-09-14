@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ozJSey/vue-copy.git"
+    "url": "git+https://github.com/ozjsey/v-copy.git"
   },
-  "homepage": "https://github.com/ozJSey/vue-copy#readme",
+  "homepage": "https://github.com/ozjsey/v-copy#readme",
   "bugs": {
-    "url": "https://github.com/ozJSey/vue-copy/issues"
+    "url": "https://github.com/ozjsey/v-copy/issues"
   },
   "type": "module",
   "main": "dist/vCopy.min.js",
