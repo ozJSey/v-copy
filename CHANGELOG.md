@@ -3,7 +3,14 @@
 All notable changes to **@ozjsey/v-copy** are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [1.2.1] — unreleased
+## 1.2.2 — 2026-09-18
+
+Documentation only; no code change. The README is cut to a landing page — problem, solution,
+install, a couple of usage examples — because the playground now carries the reference: every
+option driven in a real browser rather than described in a table. Claims that could not be
+verified against the source were deleted rather than carried across.
+
+## [1.2.1] — 2026-09-17
 
 Two bugs in `events.ts`, both of which made a documented binding do nothing at all. Each is covered
 by a unit test that fails without the fix, and each was additionally driven in a real Chrome through

@@ -1,6 +1,6 @@
 {
   "name": "@ozjsey/v-copy",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Vue 3 directive that copies any element \u2014 and keeps the last N copies so your users can pick one back out. Copy history with de-duplication, a copied-feedback state, slot-like reactive state, keyboard + a11y, and an automatic clipboard fallback. Zero dependencies.",
   "author": "Ozgur Seyidoglu",
   "license": "MIT",
