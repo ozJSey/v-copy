@@ -49,16 +49,26 @@ function detachKeyboard(el: HTMLElement, state: DirectiveState): void {
   if (state.addedRole) { el.removeAttribute('role'); state.addedRole = false }
 }
 
+/** Removes the listener only — the snapshot it took outlives it, see `detachAll`. */
 function detachPress(el: HTMLElement, state: DirectiveState): void {
   if (state.pressHandler) el.removeEventListener(PRESS_EVENT, state.pressHandler, true)
   state.pressHandler = null
-  forgetSelection(el)
 }
 
-export function detachAll(el: HTMLElement, state: DirectiveState): void {
+function detachListeners(el: HTMLElement, state: DirectiveState): void {
   detachTrigger(el, state)
   detachKeyboard(el, state)
   detachPress(el, state)
+}
+
+/**
+ * Teardown for good: every listener, plus any selection snapshot still pending.
+ * Unmount, `disabled` and a re-arm all go through here — nothing may survive
+ * into a gesture that has not happened yet.
+ */
+export function detachAll(el: HTMLElement, state: DirectiveState): void {
+  detachListeners(el, state)
+  forgetSelection(el)
 }
 
 function onTrigger(el: HTMLElement, state: DirectiveState, e: Event): void {
@@ -67,7 +77,13 @@ function onTrigger(el: HTMLElement, state: DirectiveState, e: Event): void {
   if (r.once) {
     if (state.onceFired) return
     state.onceFired = true
-    detachAll(el, state) // detach synchronously so no further events slip through
+    // Listeners go synchronously, so no further event slips through — but the
+    // selection snapshot stays. It was taken on the press that is delivering
+    // this very event, and `executeCopy` below is the copy that consumes it.
+    // Dropping it here made `.selection.once` copy nothing at all on a
+    // non-interactive host, which is the only host shape that needs the
+    // snapshot: the live selection is already collapsed by click time.
+    detachListeners(el, state)
   }
   void executeCopy(el, state, { event: e })
 }
@@ -97,6 +113,7 @@ export function setupHandlers(el: HTMLElement, state: DirectiveState, r: Resolve
     state.pressHandler = handler
   } else if (!wantPress && state.pressHandler) {
     detachPress(el, state)
+    forgetSelection(el) // the binding stopped asking: a snapshot must not resurface
   }
 
   const desired = r.trigger === false ? null : (r.trigger || 'click')
@@ -113,12 +130,27 @@ export function setupHandlers(el: HTMLElement, state: DirectiveState, r: Resolve
     }
   }
 
-  // Built-in keyboard support for non-native-interactive copyables. Skipped for
-  // native controls (they already translate Enter/Space to click) and for
-  // key-shaped triggers (the trigger listener is already on that key event) —
-  // both would otherwise copy twice for one press.
-  const wantKeyboard = desired != null && !KEY_TRIGGERS.has(desired) && !isNativeInteractive(el)
-  if (wantKeyboard && !state.keyHandler) {
+  // Built-in keyboard support for non-native-interactive copyables. Native
+  // controls are left alone: they already translate Enter/Space into a click,
+  // so a second handler would copy twice for one press.
+  const keyboardable = desired != null && !isNativeInteractive(el)
+  if (!keyboardable) {
+    detachKeyboard(el, state)
+    return
+  }
+
+  // Focusable and announced, for EVERY trigger — including a key-shaped one.
+  // An element that cannot take focus never receives a `keydown`, so gating
+  // these on the Enter/Space handler below left `trigger: 'keydown'` on a
+  // <span> unreachable from the one device it was configured for.
+  if (!el.hasAttribute('tabindex')) { el.setAttribute('tabindex', '0'); state.addedTabindex = true }
+  if (!el.hasAttribute('role')) { el.setAttribute('role', 'button'); state.addedRole = true }
+
+  // The Enter/Space handler itself, skipped when the trigger IS a key event:
+  // the trigger listener is already on that key, and both would fire for one
+  // press. (`desired` narrows to a string from `keyboardable` above.)
+  const wantEnterSpace = !KEY_TRIGGERS.has(desired)
+  if (wantEnterSpace && !state.keyHandler) {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
         e.preventDefault() // stop Space scrolling / default activation
@@ -127,9 +159,8 @@ export function setupHandlers(el: HTMLElement, state: DirectiveState, r: Resolve
     }
     el.addEventListener('keydown', handler)
     state.keyHandler = handler
-    if (!el.hasAttribute('tabindex')) { el.setAttribute('tabindex', '0'); state.addedTabindex = true }
-    if (!el.hasAttribute('role')) { el.setAttribute('role', 'button'); state.addedRole = true }
-  } else if (!wantKeyboard && state.keyHandler) {
-    detachKeyboard(el, state)
+  } else if (!wantEnterSpace && state.keyHandler) {
+    el.removeEventListener('keydown', state.keyHandler)
+    state.keyHandler = null
   }
 }

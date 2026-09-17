@@ -523,6 +523,11 @@ keeps `tabindex="0"`, `role="button"` and Enter/Space, because an action reachab
 `dblclick` or `contextmenu` would be unreachable from a keyboard. `trigger: false` removes the
 keyboard path along with everything else.
 
+A **key-shaped** trigger (`keydown`, `keyup`, `keypress`) keeps the tab stop and the role but not
+the extra Enter/Space handler — your trigger is already listening on that key, and both would copy
+twice for one press. The tab stop matters most here: an element that cannot take focus never
+receives a `keydown` at all.
+
 ### Modifiers
 
 | Modifier | Effect |

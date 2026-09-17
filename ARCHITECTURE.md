@@ -57,6 +57,13 @@ has it collapsed between `mousedown` and `mouseup`. So `events.ts` attaches a pa
 The rejected alternative, `preventDefault()` on `mousedown`, also works and additionally suppresses
 focus on the trigger — an a11y cost on every binding to fix a mouse-only problem.
 
+The snapshot's lifetime is the other half of that invariant, and 1.2.1 is what happens when it is
+got wrong: **the snapshot outlives the press listener, and only a teardown that ends the *binding*
+may drop it.** `.once` tears its listeners down inside the click it is latching, before the copy has
+read anything, so it detaches listeners without calling `forgetSelection` — otherwise the single
+copy `.once` allows is the one copy that gets refused. Unmount, `disabled`, and a binding that stops
+asking for a selection all still drop it, because those end the gesture rather than serve it.
+
 The second thing the module isolates is the string: **`getSelection().toString()` is correct here,
 and that is the opposite of `v-select-text`'s conclusion.** That package owns a resolved view of a
 selection it made, so `toString()` would mean reporting one string and writing another. Here the

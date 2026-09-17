@@ -3,6 +3,55 @@
 All notable changes to **@ozjsey/v-copy** are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] — unreleased
+
+Two bugs in `events.ts`, both of which made a documented binding do nothing at all. Each is covered
+by a unit test that fails without the fix, and each was additionally driven in a real Chrome through
+the playground's `v-copy` tab with trusted input and the real system clipboard — the two failures
+are about a selection the browser collapses and about focus, neither of which jsdom models.
+
+### Fixed
+
+- **`.selection` with `.once` copied nothing on a non-interactive host.** `<span v-copy.selection.once>`
+  — a `<button>` was never affected. The `.once` latch tears every listener down *inside* the click
+  it is latching, and that teardown also dropped the selection snapshot taken on the press. On a
+  non-interactive host that snapshot is the only text there is by click time: the browser has
+  already collapsed the live selection as the press's default action, which is the entire reason
+  1.2.0 takes a snapshot. So the one copy `.once` exists to allow was refused as `error: 'empty'`,
+  with the console warning naming an empty selection the user could plainly see was not empty.
+
+  The teardown now keeps the snapshot for the copy it is latching; `takeSelectionText` consumes it
+  a moment later, as it does on every other path. Every other teardown — unmount, `disabled`, a
+  re-arm, a binding that stops asking for a selection — still drops it, because nothing may survive
+  into a gesture that has not happened yet.
+
+  Measured before the fix, in Chrome, with a real drag and a trusted click:
+  `dragged="first algorithm" firstPress="COPY5-SENTINEL-once"` — the clipboard still held the
+  sentinel written before the test, i.e. nothing was copied.
+
+- **A key-shaped `trigger` (`keydown` / `keyup` / `keypress`) left a non-interactive host out of the
+  tab order, so no keyboard could ever fire it.** The `tabindex="0"` + `role="button"` injection and
+  the built-in Enter/Space handler were gated on one condition, and a key-shaped trigger switched
+  off both. Skipping the Enter/Space handler is correct — the trigger listener is already on that
+  key event, and both would copy twice for one press — but skipping the tab stop with it left
+  `<span v-copy="{ trigger: 'keydown' }">` unreachable from the only input device a `keydown`
+  trigger has, while the README promised a custom trigger keeps the keyboard path. The two are now
+  decided separately: the tab stop and the role are added for every trigger, the Enter/Space handler
+  only when the trigger is not itself a key event.
+
+  Measured before the fix: `tabindex=null role=null focusAfter8Tabs=button.demo__btn` — eight
+  trusted Tab presses walked straight past the span and out of the card.
+
+### Playground
+
+- `16-user-selection.vue` gains a `.selection.once` trigger (with a re-arm control, since `.once`
+  detaches for good), and `09-disabled-trigger.vue` gains a `trigger: 'keydown'` host. Both are
+  driven by new checks in `playground/scripts/interactions/v-copy.mjs`: the selection one drags a
+  real selection, clicks with trusted input and reads the real system clipboard back; the key one
+  walks the real tab order with trusted Tab presses and asserts the `[data-copied]` the library
+  raises only after the clipboard write resolved — a `readText()` on that card stalls the renderer,
+  which the check says so in its own comment.
+
 ## 1.2.0
 
 ### Added — `v-copy.selection`: copy what the **user** highlighted

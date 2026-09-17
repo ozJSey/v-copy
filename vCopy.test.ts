@@ -1273,6 +1273,48 @@ describe('audit regressions', () => {
     unmount()
   })
 
+  it('switching a live trigger to a key event keeps the tab stop and drops the duplicate handler', async () => {
+    // The diff-driven path: the host already has the Enter/Space handler and
+    // the injected attributes from a click trigger. Switching to a key trigger
+    // must remove exactly one of the two — the handler, because the trigger
+    // listener now sits on the same key — and keep the tab stop, or the new
+    // trigger is unreachable.
+    const ctrl = reactive<CopyController>({ source: 'k', trigger: 'click' })
+    const { el, unmount } = mount('<span v-copy="ctrl">c</span>', { ctrl })
+    expect(el.getAttribute('tabindex')).toBe('0')
+
+    ctrl.trigger = 'keydown'
+    expect(el.getAttribute('tabindex')).toBe('0')
+    expect(el.getAttribute('role')).toBe('button')
+
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flush()
+    expect(writeText).toHaveBeenCalledTimes(1) // once, not once per listener
+    unmount()
+  })
+
+  it('a keyboard trigger still leaves the host focusable', async () => {
+    // Skipping the Enter/Space handler for a key-shaped trigger is right (the
+    // trigger listener is already on that key). Skipping `tabindex`/`role`
+    // along with it was not: a <span> that cannot take focus never receives a
+    // `keydown` at all, so the binding was unreachable from the one input
+    // device it was configured for. jsdom refuses `.focus()` on an element it
+    // does not consider focusable, which is exactly the assertion here.
+    const { el, unmount } = mount('<span v-copy="{ source: \'k\', trigger: \'keydown\' }">c</span>')
+    expect(el.getAttribute('tabindex')).toBe('0')
+    expect(el.getAttribute('role')).toBe('button')
+    el.focus()
+    expect(document.activeElement).toBe(el)
+
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flush()
+    expect(writeText).toHaveBeenCalledTimes(1)
+
+    unmount()
+    expect(el.hasAttribute('tabindex')).toBe(false)
+    expect(el.hasAttribute('role')).toBe(false)
+  })
+
   it('re-creates the aria-live region after something removes it', async () => {
     const first = mount('<button v-copy="\'x\'">c</button>')
     first.el.click()
@@ -1653,6 +1695,31 @@ describe('user selection', () => {
     el.click()
     await flush()
     expect(writeText).toHaveBeenCalledWith('the label') // back to textContent
+    unmount()
+  })
+
+  it('`.once` copies the captured selection — the latch must not eat the snapshot', async () => {
+    // A non-interactive host is the shape that needs the snapshot at all: the
+    // browser collapses the selection as the press's default action, so by
+    // click time the live selection is gone and the capture is the only text
+    // there is. `.once` tears its listeners down *inside* that click, before
+    // `executeCopy` has read anything — so a teardown that also drops the
+    // snapshot refuses the single copy `.once` exists to make.
+    const text = paragraph()
+    selectText(text, 4, 9)
+    const { el, unmount } = mount('<span v-copy.selection.once>Copy</span>')
+
+    press(el)
+    clearSelection() // what the browser does as the press's default action
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('quick')
+
+    // Still latched, and the consumed snapshot is not a second copy.
+    selectText(text, 10, 15)
+    el.click()
+    await flush()
+    expect(writeText).toHaveBeenCalledTimes(1)
     unmount()
   })
 })
