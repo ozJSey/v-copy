@@ -5,6 +5,7 @@ back out.
 
 [![npm](https://img.shields.io/npm/v/@ozjsey/v-copy.svg)](https://www.npmjs.com/package/@ozjsey/v-copy)
 ![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![gzipped 4.39 KiB](https://img.shields.io/badge/gzipped-4.39%20KiB-blue.svg)
 ![dependencies 0](https://img.shields.io/badge/dependencies-0-blue.svg)
 
 ## The problem
